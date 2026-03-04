@@ -1,0 +1,155 @@
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_absolute_error
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
+# =========================
+# 1. 读入数据
+# =========================
+file_path = "Signal_protocol.xlsx"
+df = pd.read_excel(file_path)
+print(df.columns.tolist())
+df['Posterior NT(%)'] = (
+    df['Hindbrain(%)'].fillna(0)
+    + df['Cervical-Thoracic NT(%)'].fillna(0)
+)
+
+# =========================
+# 2. 计算通路强度（先通路内标准化，再相加）
+# =========================
+def zscore(series):
+    """z-score 标准化（population std）"""
+    return (series - series.mean()) / series.std(ddof=0)
+
+# WNT / FGF
+df['WNT_signal'] = zscore(df['CHIR (μM)'] * df['CHIR_time'])
+df['FGF2_z']  = zscore(df['FGF2 (ng ml-1)'] * df['FGF2_time'])
+df['FGF8_z']  = zscore(df['FGF8 (ng ml-1)'] * df['FGF8_time'])
+df['FGF_signal'] = df['FGF2_z'] + df['FGF8_z']
+
+# RA pathway
+df['RA_z']  = zscore(df['RA (nM)'] * df['RA_time'])
+df['RAL_z'] = zscore(df['RAL(μM)'] * df['RAL_time'])
+df['RA_signal'] = df['RA_z'] + df['RAL_z']
+
+# Ventral / SHH
+df['Neural_ventral'] = zscore(df['SAG(μM)'] * df['SAG_time'])
+
+# SMAD inhibition
+smadi_cols = ['SMADi_LDN (μM)', 'SMADi_SB (μM)', 'SMADi_DMH1 (μM)', 'SMADi_A8301(μM)']
+smadi_time_cols = ['SMADi_LDN_time', 'SMADi_SB_time', 'SMADi_DMH1_time', 'SMADi_A8301_time']
+
+df['SMADi_signal'] = 0
+for conc_col, time_col in zip(smadi_cols, smadi_time_cols):
+    if conc_col in df.columns and time_col in df.columns:
+        smad_i = df[conc_col] * df[time_col]
+        df['SMADi_signal'] += zscore(smad_i)
+
+# =========================
+# 3. 特征矩阵 & 归一化
+# =========================
+features = ['WNT_signal','FGF_signal','RA_signal','SMADi_signal']
+lineage_cols = ['Anterior NT(%)', 'Posterior NT(%)', 'NMP(%)', 'Mesoderm(%)']
+
+X = df[features]
+scaler = StandardScaler()
+#scaler = MinMaxScaler()
+X_scaled = scaler.fit_transform(X)
+
+
+
+# =========================
+# 4. 回归建模（有截距）
+# =========================
+models = {}
+coef_dict = {}
+predictions = {}
+
+for lineage in lineage_cols:
+    y = df[lineage]  # 0–1
+
+    model = LinearRegression(fit_intercept=True)
+    model.fit(X_scaled, y)
+    
+    y_pred = model.predict(X_scaled)
+    #y_pred = np.clip(y_pred, 0, 1)
+
+    models[lineage] = model
+    predictions[lineage] = y_pred
+    coef_dict[lineage.replace(' (%)','')] = model.coef_
+
+    # 保存拟合值到 DataFrame
+    df[lineage.replace(' (%)','') + "_fit"] = y_pred
+
+    # ---- print equation with intercept ----
+    eq_terms = [f"{model.intercept_:.3f}"]  # 截距
+    for f, c in zip(features, model.coef_):
+        eq_terms.append(f"{c:.3f}·{f}")
+    print(f"\n=== {lineage} (with intercept) ===")
+    print("Lineage =", " + ".join(eq_terms))
+    print(f"R² = {r2_score(y, y_pred):.2f}, MAE = {mean_absolute_error(y, y_pred):.3f}")
+
+# =========================
+# 5. 绘制散点图（预测 vs 实测）
+# =========================
+# =========================
+# 5. 绘制散点图（预测 vs 实测，按 Sample ID 前缀上色）
+# =========================
+
+plt.rcParams['svg.fonttype'] = 'none'  # 保持文本向量，可在 Illustrator 编辑
+
+# 定义颜色映射函数
+def get_color(sample_id):
+    if sample_id.startswith("SM"):
+        return "green"
+    elif sample_id.startswith("NT"):
+        return "red"
+    elif sample_id.startswith("TK"):
+        return "orange"
+    else:
+        return "grey"
+
+colors = df['Sample ID'].apply(get_color)
+
+for lineage in lineage_cols:
+    y_true = df[lineage]
+    y_pred = df[lineage.replace(' (%)','') + "_fit"]
+
+    plt.figure(figsize=(4,4))
+    plt.scatter(y_true, y_pred, s=70, color=colors)  # 根据前缀上色
+
+    # 画 y=x 虚线
+    min_v = min(y_true.min(), y_pred.min())
+    max_v = max(y_true.max(), y_pred.max())
+    plt.plot([min_v, max_v], [min_v, max_v], 'k--')
+
+    # 给每个点加标签
+    for i, sid in enumerate(df['Sample ID']):
+        plt.text(y_true.iloc[i]+1, y_pred[i], sid, fontsize=8)
+
+    plt.xlabel("True (%)")
+    plt.ylabel("Predicted (%)")
+    plt.title(lineage)
+    plt.tight_layout()
+    plt.savefig(f"res_standard_withintercept_noshh/{lineage.replace(' (%)','').replace(' ','_')}_fit_colored.svg", dpi=300)
+    plt.show()
+
+    coef_df = pd.DataFrame(coef_dict, index=features)
+
+plt.figure(figsize=(8,5))
+sns.heatmap(
+    coef_df.T,
+    cmap="coolwarm",
+    center=0,
+    annot=True,
+    fmt=".2f"
+)
+plt.xlabel("Signaling pathway")
+plt.ylabel("Lineage")
+plt.title("Linear weights (with intercept)")
+plt.tight_layout()
+plt.savefig("res_standard_withintercept_noshh/lineage_signal_weights_with_intercept.svg", dpi=300)
+plt.show()
