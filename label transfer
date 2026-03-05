@@ -27,20 +27,7 @@ ribosomal_genes_Jianping <- grep("^RPS|^RPL", rownames(Jianping), value = TRUE)
 Jianping <- subset(Jianping, features = setdiff(rownames(Jianping), ribosomal_genes_Jianping))
 dim(Jianping)
 
-
-
-# 创建包含随机 1000 个细胞的子集
-cell_names <- colnames(Jianping)
-set.seed(123)  # 保证结果可复现
-random_cells_Jianping <- sample(cell_names, 1000)
-Jianping <- subset(Jianping, cells = random_cells_Jianping)
-
-PCW3 <- Read10X_h5("PCW3_wholebody.h5")
-PCW3 <- CreateSeuratObject(counts = PCW3)
-PCW3[["percent.mt"]] <- PercentageFeatureSet(PCW3, pattern = "^MT-")
-PCW3 <- subset(PCW3, subset = nFeature_RNA > 1500 & nCount_RNA > 500 & nCount_RNA < 50000 & percent.mt >2 & percent.mt < 12)
-ribosomal_genes_PCW3 <- grep("^RPS|^RPL", rownames(PCW3), value = TRUE)
-PCW3 <- subset(PCW3, features = setdiff(rownames(PCW3), ribosomal_genes_PCW3))
+PCW3 <- readRDS("PCW3_0802.rds")
 Jianping$sample = "Jianping"
 PCW3$sample = "PCW3"
 Jianping <- NormalizeData(Jianping)
