@@ -1,0 +1,108 @@
+library(Seurat)
+library(dplyr)
+library(Matrix)
+# 读取稀疏矩阵
+mat <- readMM("Jianping_day4_matrix.mtx.gz")
+
+# 读取基因和细胞条形码
+genes <- read.table("Jianping_day4_features.tsv.gz", header = FALSE, stringsAsFactors = FALSE)
+barcodes <- read.table("Jianping_day4_barcodes.tsv", header = FALSE, stringsAsFactors = FALSE)
+
+# 确保维度匹配
+if (nrow(genes) != nrow(mat)) {
+  stop("基因数量与矩阵行数不匹配")
+}
+if (nrow(barcodes) != ncol(mat)) {
+  stop("细胞数量与矩阵列数不匹配")
+}
+
+# 设置行名和列名
+rownames(mat_Jianping) <- make.unique(genes_Jianping$V2)
+colnames(mat_Jianping) <- barcodes_Jianping$V1
+Jianping <- CreateSeuratObject(counts = mat_Jianping, project = "Day4_Jianping")
+
+Jianping[["percent.mt"]] <- PercentageFeatureSet(Jianping, pattern = "^MT-")
+Jianping <- subset(Jianping, subset = nFeature_RNA > 200 & nCount_RNA > 500 & nCount_RNA < 50000 & percent.mt < 10)
+ribosomal_genes_Jianping <- grep("^RPS|^RPL", rownames(Jianping), value = TRUE)
+Jianping <- subset(Jianping, features = setdiff(rownames(Jianping), ribosomal_genes_Jianping))
+dim(Jianping)
+
+
+
+# 创建包含随机 1000 个细胞的子集
+cell_names <- colnames(Jianping)
+set.seed(123)  # 保证结果可复现
+random_cells_Jianping <- sample(cell_names, 1000)
+Jianping <- subset(Jianping, cells = random_cells_Jianping)
+
+PCW3 <- Read10X_h5("PCW3_wholebody.h5")
+PCW3 <- CreateSeuratObject(counts = PCW3)
+PCW3[["percent.mt"]] <- PercentageFeatureSet(PCW3, pattern = "^MT-")
+PCW3 <- subset(PCW3, subset = nFeature_RNA > 1500 & nCount_RNA > 500 & nCount_RNA < 50000 & percent.mt >2 & percent.mt < 12)
+ribosomal_genes_PCW3 <- grep("^RPS|^RPL", rownames(PCW3), value = TRUE)
+PCW3 <- subset(PCW3, features = setdiff(rownames(PCW3), ribosomal_genes_PCW3))
+Jianping$sample = "Jianping"
+PCW3$sample = "PCW3"
+Jianping <- NormalizeData(Jianping)
+PCW3 <- NormalizeData(PCW3)
+
+# 2. 计算参考数据集 PCW3 的 PCA
+PCW3 <- FindVariableFeatures(PCW3)
+PCW3 <- ScaleData(PCW3)
+PCW3 <- RunPCA(PCW3, npcs = 30)
+PCW3 <- FindNeighbors(PCW3, dims = 1:30)
+PCW3 <- FindClusters(PCW3, resolution = 1)
+PCW3 <- RunUMAP(PCW3, reduction = "pca", dims = 1:30, umap.method = "umap-learn", return.model = TRUE)
+library(ggplot2)
+my_colors <- c("#E63946", "#F77F00", "#F4A261", "#2A9D8F", "#264653",
+               "#6A0572", "#A94438", "#5D8233", "#B58900", "#004E98",
+               "#DD2D4A", "#31708E", "#7EBDC2", "#FF6F61", "#0D3B66",
+               "#E84855", "#9A031E", "#3D348B", "#F5A623")
+DimPlot(PCW3, group.by = "seurat_clusters", cols = my_colors, label = FALSE,
+        pt.size = 0.05)
+
+
+
+# 3. 计算查询数据集 CFS 的 PCA
+Jianping <- FindVariableFeatures(Jianping)
+Jianping <- ScaleData(Jianping)
+Jianping <- RunPCA(Jianping, npcs = 30)
+
+# 4. 计算数据集迁移的锚点
+anchors <- FindTransferAnchors(
+  reference = PCW3,
+  query = Jianping,
+  reference.reduction = "pca",
+  dims = 1:30
+)
+# 5. 在 PCW3 的 UMAP 坐标上投射 CFS 细胞
+Jianping <- MapQuery(
+  anchorset = anchors, 
+  reference = PCW3, 
+  query = Jianping, 
+  refdata = list(celltype = PCW3$seurat_clusters), # 迁移细胞类型
+  reference.reduction = "pca", 
+  reduction.model = "umap"
+)
+
+# 获取 PCW3 的 UMAP 坐标
+pcw3_umap <- Embeddings(PCW3, "umap")
+pcw3_umap <- as.data.frame(pcw3_umap)
+colnames(pcw3_umap) <- c("UMAP_1", "UMAP_2") 
+pcw3_umap$celltype <- "PCW3"  # 给 PCW3 细胞加上标签
+# 获取 CFS 细胞投射后的 UMAP 坐标
+Jianping_umap <- Embeddings(Jianping, "ref.umap")
+Jianping_umap <- as.data.frame(Jianping_umap)
+colnames(Jianping_umap) <- c("UMAP_1", "UMAP_2") 
+Jianping_umap$celltype <- Jianping$predicted.celltype  # 给 CFS 细胞加上预测标签
+# 合并两个数据集
+combined_umap <- rbind(pcw3_umap, Jianping_umap)
+# 画图，清除网格线，添加坐标轴线
+ggplot() +
+  geom_point(data = pcw3_umap, aes(x = UMAP_1, y = UMAP_2), color = "grey", alpha = 0.3, size = 0.3) +  # 背景 PCW3 细胞，大小为0.2
+  geom_point(data = Jianping_umap, aes(x = UMAP_1, y = UMAP_2), color = "#0099CC", alpha = 0.3, size = 0.3) +  # 叠加 CFS 细胞，大小为0.3
+  theme_minimal() +  # 使用简洁的主题
+  theme(panel.grid = element_blank(),  # 清除背景网格线
+        axis.line = element_line(color = "black")) +  # 添加黑色坐标轴线
+  ggtitle("Jianping projection on PCW3") +
+  theme(legend.position = "right")
